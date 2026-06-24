@@ -23,6 +23,7 @@ COPY packages/shared packages/shared
 COPY packages/web packages/web
 
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NYXTOK_API_URL=http://api:3000
 RUN pnpm --filter @nyxtok/web build
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,7 @@ ENV NODE_ENV=production \
 COPY --from=builder /app/packages/web/.next/standalone ./
 COPY --from=builder /app/packages/web/.next/static ./packages/web/.next/static
 COPY --from=builder /app/packages/web/public ./packages/web/public
+COPY --from=builder /app/packages/web/.next/server ./packages/web/.next/server
 
 EXPOSE 3001
 

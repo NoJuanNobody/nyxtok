@@ -86,7 +86,10 @@ function toVideoRow(
     ai_relevance_score: v.ai_score,
     published_at: new Date(v.published_at),
     thumbnail_url: v.thumbnail_url,
-    download_status: 'pending',
+    // Store the TikTok CDN URL so the stream endpoint can proxy it directly —
+    // no need to download the video file to disk first.
+    download_url: v.play_addr || null,
+    download_status: v.play_addr ? 'completed' : 'pending',
     transcript_status: 'pending',
     validation_status: 'pending',
   };

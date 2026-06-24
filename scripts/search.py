@@ -50,6 +50,9 @@ async def search_hashtag(tag_name: str, count: int) -> list[dict]:
             author_handle = author.get("uniqueId", "")
             url = f"https://www.tiktok.com/@{author_handle}/video/{video_id}" if video_id and author_handle else ""
 
+            # Direct CDN URL for streaming (no download needed)
+            play_addr = v.get("video", {}).get("playAddr", "") or ""
+
             meta = {
                 "video_id": video_id,
                 "creator_handle": author_handle,
@@ -61,9 +64,10 @@ async def search_hashtag(tag_name: str, count: int) -> list[dict]:
                 "share_count": stats.get("shareCount", 0) or 0,
                 "comment_count": stats.get("commentCount", 0) or 0,
                 "duration_seconds": v.get("video", {}).get("duration", 0) or 0,
-                "published_at": "",  # TikTokApi doesn't expose upload date reliably
+                "published_at": "",
                 "thumbnail_url": v.get("video", {}).get("cover", "") or "",
                 "url": url,
+                "play_addr": play_addr,
             }
             results.append(meta)
     finally:

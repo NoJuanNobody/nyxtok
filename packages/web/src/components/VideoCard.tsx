@@ -93,7 +93,13 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
   }, [inView, srcLoaded]);
 
   // --- Transcript polling (#14) ---------------------------------------------
+  // Only poll for videos the user has liked or bookmarked — that's when the
+  // pipeline actually runs. Uninteracted videos stay at 'pending' forever and
+  // should not show badges or waste requests.
+  const shouldPoll = isLiked || isBookmarked;
+
   useEffect(() => {
+    if (!shouldPoll) return;
     if (!srcLoaded && !inView) return; // only poll when the card is active
 
     let cancelled = false;
@@ -170,7 +176,7 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
     };
     // Re-run when the card becomes active / loads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inView, srcLoaded, video.video_id]);
+  }, [inView, srcLoaded, video.video_id, shouldPoll]);
 
   // --- Actions --------------------------------------------------------------
 
@@ -219,6 +225,10 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
   const tStatus = transcript?.transcript_status ?? video.transcript_status;
   const vStatus = transcript?.validation_status ?? video.validation_status;
   const score = transcript?.validation_accuracy_score ?? video.validation_accuracy_score;
+
+  // Badges only make sense after the user has liked/bookmarked (which triggers
+  // the pipeline). Don't show "Transcribing…" on videos that were never queued.
+  const showBadges = isLiked || isBookmarked;
 
   const transcriptBadge = (() => {
     if (tStatus === 'pending' || tStatus === 'in_progress') {
@@ -288,28 +298,30 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
       {/* Gradient overlay for legibility */}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/30 via-transparent to-black/70" />
 
-      {/* Top badges (transcript + validation, #14) */}
-      <div className="absolute left-3 top-3 z-20 flex flex-col gap-1.5">
-        {transcriptBadge && (
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold backdrop-blur ${transcriptBadge.cls}`}
-          >
-            {transcriptBadge.icon === 'spinner' ? (
-              <span className="inline-block h-3 w-3 animate-spin-slow rounded-full border-[1.5px] border-current border-t-transparent" />
-            ) : (
-              <span>{transcriptBadge.icon}</span>
-            )}
-            {transcriptBadge.label}
-          </span>
-        )}
-        {validationBadge && (
-          <span
-            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold backdrop-blur ${validationBadge.cls}`}
-          >
-            {validationBadge.label}
-          </span>
-        )}
-      </div>
+      {/* Top badges (transcript + validation, #14) — only for liked/bookmarked */}
+      {showBadges && (
+        <div className="absolute left-3 top-3 z-20 flex flex-col gap-1.5">
+          {transcriptBadge && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold backdrop-blur ${transcriptBadge.cls}`}
+            >
+              {transcriptBadge.icon === 'spinner' ? (
+                <span className="inline-block h-3 w-3 animate-spin-slow rounded-full border-[1.5px] border-current border-t-transparent" />
+              ) : (
+                <span>{transcriptBadge.icon}</span>
+              )}
+              {transcriptBadge.label}
+            </span>
+          )}
+          {validationBadge && (
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold backdrop-blur ${validationBadge.cls}`}
+            >
+              {validationBadge.label}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Bottom-left info overlay */}
       <div className="absolute bottom-20 left-3 z-20 max-w-[75%] space-y-1">

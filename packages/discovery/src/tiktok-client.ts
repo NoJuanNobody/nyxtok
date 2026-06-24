@@ -44,6 +44,8 @@ export interface TikTokVideoMeta {
   thumbnail_url: string;
   /** Full TikTok webpage URL (needed for downloading). */
   url: string;
+  /** Direct TikTok CDN URL for streaming (no download needed). */
+  play_addr?: string;
 }
 
 /** Raw yt-dlp JSON shape (for getVideoMeta). */
@@ -150,6 +152,7 @@ function parseJsonStream(stdout: string): TikTokVideoMeta[] {
           published_at: parsed.published_at || new Date().toISOString(),
           thumbnail_url: parsed.thumbnail_url ?? '',
           url: parsed.url ?? '',
+          play_addr: parsed.play_addr ?? '',
         });
       }
     } catch {
