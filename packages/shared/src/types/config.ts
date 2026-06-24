@@ -10,10 +10,8 @@ export interface EnvConfig {
   DATABASE_URL: string;
   /** Absolute path to the on-disk vault where media/transcripts are stored. */
   VAULT_PATH: string;
-  /** Bearer token used to authenticate TikTok MCP requests. */
+  /** Bearer token used to authenticate API requests. */
   AUTH_TOKEN: string;
-  /** Base URL of the TikTok MCP server used by discovery. */
-  TIKTOK_MCP_URL: string;
 
   // --- Optional with defaults ---
   /** Groq API key (required when WHISPER_SERVICE=groq or VALIDATION_ENABLED). */

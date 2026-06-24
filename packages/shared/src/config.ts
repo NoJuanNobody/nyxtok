@@ -5,7 +5,6 @@ const REQUIRED_VARS: ReadonlyArray<keyof EnvConfig> = [
   'DATABASE_URL',
   'VAULT_PATH',
   'AUTH_TOKEN',
-  'TIKTOK_MCP_URL',
 ];
 
 /**
@@ -31,7 +30,6 @@ export function loadConfig(
     DATABASE_URL: env.DATABASE_URL as string,
     VAULT_PATH: env.VAULT_PATH as string,
     AUTH_TOKEN: env.AUTH_TOKEN as string,
-    TIKTOK_MCP_URL: env.TIKTOK_MCP_URL as string,
     GROQ_API_KEY: env.GROQ_API_KEY,
     DISCOVERY_CRON: env.DISCOVERY_CRON,
     VALIDATION_ENABLED: env.VALIDATION_ENABLED,

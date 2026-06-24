@@ -63,7 +63,8 @@ services:
       DATABASE_URL: postgresql://nyxtok:nyxtok@postgres:5432/nyxtok
       VAULT_PATH: /data/vault
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      TIKTOK_MCP_URL: ${TIKTOK_MCP_URL:-}
+      TIKTOK_HASHTAGS: ${TIKTOK_HASHTAGS:-}
+      TIKTOK_CREATORS: ${TIKTOK_CREATORS:-}
       AUTH_TOKEN: ${AUTH_TOKEN:-}
       DISCOVERY_CRON: ${DISCOVERY_CRON:-0 */6 * * *}
       DISCOVERY_RUN_NOW: "0"

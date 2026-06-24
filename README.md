@@ -62,8 +62,10 @@ Obsidian-style Markdown notes to a vault — all surfaced through a fast web UI.
 **Data flow:**
 
 1. **Discovery** (`packages/discovery`) — a cron worker searches TikTok for
-   AI/ML hashtags via `yt-dlp`, applies a viral-engagement filter and an
-   AI-relevance filter, then upserts survivors into Postgres.
+   AI/ML hashtags via the Python TikTokApi CLI (playwright-based, no MCP),
+   applies a viral-engagement filter and an AI-relevance filter, then upserts
+   survivors into Postgres. Hashtags are configurable via `TIKTOK_HASHTAGS`
+   env var. Optionally monitors specific creators via yt-dlp.
 2. **API** (`packages/api`) — a Fastify server exposes the feed, search,
    actions (like / bookmark / dismiss), transcript, and streaming endpoints.
    When a user **likes** a video, the API enqueues the full pipeline job.
@@ -196,7 +198,9 @@ configuration lives in [`railway.json`](railway.json).
 | `DATABASE_URL`           | ✅       | —                  | Postgres connection string.                                    |
 | `VAULT_PATH`             | ✅       | `/data/vault`      | Directory for Markdown vault notes + media.                    |
 | `AUTH_TOKEN`             | ✅       | —                  | Bearer token for API auth (empty = disabled in dev).           |
-| `TIKTOK_MCP_URL`         | ✅       | —                  | TikTok MCP server base URL (discovery).                        |
+| `TIKTOK_HASHTAGS`        |          | *(built-in list)*  | Comma-separated hashtags to search (without #).                |
+| `TIKTOK_CREATORS`        |          | —                  | Optional: comma-separated creator handles to also monitor.      |
+| `TIKTOK_SEARCH_LIMIT`    |          | `30`               | Max videos to request per hashtag per discovery run.            |
 | `GROQ_API_KEY`           | 🔶       | —                  | Groq API key (Whisper + chat). Required for transcription.     |
 | `WHISPER_SERVICE`        |          | `groq`             | Whisper backend: `groq` or `captions`.                        |
 | `DISCOVERY_CRON`         |          | `0 */6 * * *`      | Cron schedule for the discovery loop.                          |

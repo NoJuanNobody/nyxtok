@@ -1,9 +1,12 @@
 /**
  * Main discovery loop.
  *
- * Issue #8: for each hashtag / keyword, search TikTok via yt-dlp, apply the
- * viral engagement filter, apply the AI relevance filter, and upsert the
- * survivors into the database. Logs progress for each search term.
+ * For each configured hashtag, search TikTok via the Python TikTokApi CLI
+ * (playwright-based, avoids bot detection), apply the viral engagement filter
+ * and AI relevance filter, then upsert survivors into the database.
+ *
+ * Optionally also monitors specific creators via yt-dlp if TIKTOK_CREATORS
+ * is set.
  */
 
 import { upsertVideo } from '@nyxtok/shared';
@@ -12,8 +15,11 @@ import { TikTokClient, type TikTokVideoMeta } from './tiktok-client';
 import { applyViralFilter } from './viral-filter';
 import { applyAiFilter } from './ai-filter';
 
-/** Hashtags searched (without leading #). */
-export const SEARCH_HASHTAGS: string[] = [
+/**
+ * Hashtags searched (without leading #). Override via TIKTOK_HASHTAGS env var
+ * (comma-separated).
+ */
+const DEFAULT_HASHTAGS: string[] = [
   'AI',
   'MachineLearning',
   'LLM',
@@ -27,6 +33,30 @@ export const SEARCH_HASHTAGS: string[] = [
   'NLP',
   'PromptEngineering',
 ];
+
+/**
+ * Optional: creators to also monitor via yt-dlp. Set via TIKTOK_CREATORS env
+ * var (comma-separated handles, without @). Empty by default.
+ */
+const DEFAULT_CREATORS: string[] = [];
+
+/** Parse hashtag list from env or fall back to defaults. */
+function getHashtags(): string[] {
+  const env = process.env.TIKTOK_HASHTAGS;
+  if (env && env.trim()) {
+    return env.split(',').map((h) => h.replace(/^#/, '').trim()).filter(Boolean);
+  }
+  return DEFAULT_HASHTAGS;
+}
+
+/** Parse creator list from env. */
+function getCreators(): string[] {
+  const env = process.env.TIKTOK_CREATORS;
+  if (env && env.trim()) {
+    return env.split(',').map((h) => h.replace(/^@/, '').trim()).filter(Boolean);
+  }
+  return DEFAULT_CREATORS;
+}
 
 /** Re-export the downloader for callers (e.g. index of package). */
 export { downloadVideo } from './downloader';
@@ -62,21 +92,71 @@ function toVideoRow(
   };
 }
 
-/** Process a single search term (hashtag or keyword). */
-async function processTerm(
-  kind: 'hashtag' | 'keyword',
-  term: string,
+/** Process a single hashtag: search, filter, enrich, store. */
+async function processHashtag(
+  hashtag: string,
 ): Promise<{ found: number; viral: number; stored: number }> {
-  const label = kind === 'hashtag' ? `#${term}` : `"${term}"`;
-
-  let found: TikTokVideoMeta[];
-  if (kind === 'hashtag') {
-    found = await client.searchByHashtag(term);
-  } else {
-    found = await client.searchByKeyword(term);
-  }
+  // Search via TikTokApi (playwright) — returns full engagement metrics.
+  const found = await client.searchByHashtag(hashtag);
 
   // Deduplicate by video_id within this batch.
+  const seen = new Set<string>();
+  const unique = found.filter((v) => {
+    if (!v.video_id || seen.has(v.video_id)) return false;
+    seen.add(v.video_id);
+    return true;
+  });
+
+  // Viral engagement filter.
+  const viral = applyViralFilter(unique);
+
+  // Enrich: fill in upload dates from yt-dlp (TikTokApi doesn't return them).
+  const enriched: TikTokVideoMeta[] = [];
+  for (const v of viral) {
+    if (v.published_at && v.published_at !== new Date().toISOString()) {
+      // Already have a valid date — keep as-is.
+      enriched.push(v);
+      continue;
+    }
+    if (v.url) {
+      const full = await client.getVideoMeta(v.url);
+      if (full) {
+        // Merge: keep TikTokApi's engagement stats (more reliable), take yt-dlp's date.
+        enriched.push({ ...v, published_at: full.published_at });
+      } else {
+        enriched.push(v);
+      }
+    } else {
+      enriched.push(v);
+    }
+  }
+
+  // AI relevance filter.
+  const scored = await applyAiFilter(enriched);
+
+  let stored = 0;
+  for (const v of scored) {
+    try {
+      await upsertVideo(toVideoRow(v));
+      stored += 1;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[discovery] upsert failed for ${v.video_id} (#${hashtag}): ${msg}`);
+    }
+  }
+
+  console.log(
+    `[discovery] #${hashtag}: found=${unique.length} viral=${viral.length} stored=${stored}`,
+  );
+  return { found: unique.length, viral: viral.length, stored };
+}
+
+/** Process a single creator (supplementary to hashtag search). */
+async function processCreator(
+  handle: string,
+): Promise<{ found: number; viral: number; stored: number }> {
+  const found = await client.listCreatorVideos(handle);
+
   const seen = new Set<string>();
   const unique = found.filter((v) => {
     if (!v.video_id || seen.has(v.video_id)) return false;
@@ -94,18 +174,18 @@ async function processTerm(
       stored += 1;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[discovery] upsert failed for ${v.video_id} (${label}): ${msg}`);
+      console.error(`[discovery] upsert failed for ${v.video_id} (@${handle}): ${msg}`);
     }
   }
 
   console.log(
-    `[discovery] ${label}: found=${unique.length} viral=${viral.length} stored=${stored}`,
+    `[discovery] @${handle}: found=${unique.length} viral=${viral.length} stored=${stored}`,
   );
   return { found: unique.length, viral: viral.length, stored };
 }
 
 /**
- * Run a full discovery pass over all configured hashtags and keywords.
+ * Run a full discovery pass over all configured hashtags and creators.
  * Returns aggregate counts.
  */
 export async function runDiscovery(): Promise<{
@@ -114,21 +194,37 @@ export async function runDiscovery(): Promise<{
   total_stored: number;
 }> {
   const startedAt = new Date().toISOString();
-  console.log(`[discovery] run starting at ${startedAt}`);
+  const hashtags = getHashtags();
+  const creators = getCreators();
+  console.log(`[discovery] run starting at ${startedAt} (${hashtags.length} hashtags, ${creators.length} creators)`);
 
   let total_found = 0;
   let total_viral = 0;
   let total_stored = 0;
 
-  for (const tag of SEARCH_HASHTAGS) {
+  // Phase 1: Hashtag search via TikTokApi.
+  for (const tag of hashtags) {
     try {
-      const r = await processTerm('hashtag', tag);
+      const r = await processHashtag(tag);
       total_found += r.found;
       total_viral += r.viral;
       total_stored += r.stored;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[discovery] hashtag #${tag} failed: ${msg}`);
+    }
+  }
+
+  // Phase 2: Creator monitoring via yt-dlp (optional, supplementary).
+  for (const handle of creators) {
+    try {
+      const r = await processCreator(handle);
+      total_found += r.found;
+      total_viral += r.viral;
+      total_stored += r.stored;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[discovery] creator @${handle} failed: ${msg}`);
     }
   }
 

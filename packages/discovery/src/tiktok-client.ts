@@ -1,22 +1,32 @@
 /**
- * TikTok search abstraction.
+ * TikTok search client — shells out to Python TikTokApi (playwright-based).
  *
- * Issue #8: uses yt-dlp to search TikTok by hashtag / keyword and extract
- * metadata without downloading any video bytes.
+ * yt-dlp cannot search TikTok by hashtag/keyword (unsupported URL formats),
+ * so we use the TikTokApi Python library which drives a real Chromium browser
+ * via Playwright. This avoids bot detection and returns full engagement metrics.
  *
- * yt-dlp can dump metadata for TikTok URLs via `--dump-json` (one JSON object
- * per line). We issue a search URL and parse the resulting JSON stream into the
- * normalized `TikTokVideoMeta` shape consumed by the rest of the discovery
- * pipeline.
+ * The Python CLI (scripts/search.py) outputs one JSON object per line on stdout,
+ * matching the same TikTokVideoMeta shape we use internally.
+ *
+ * yt-dlp is still used for:
+ *   - Downloading videos (downloader.ts)
+ *   - Individual video metadata enrichment (getVideoMeta)
  */
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
-/** Maximum number of search results to request from yt-dlp. */
-const SEARCH_LIMIT = Number(process.env.TIKTOK_SEARCH_LIMIT ?? 30);
+/** Root directory of the nyxtok repo (where scripts/ lives). */
+const REPO_ROOT = process.env.NYXTOK_ROOT ?? join(__dirname, '..', '..');
+
+/** Path to the Python search script. */
+const SEARCH_SCRIPT = join(REPO_ROOT, 'scripts', 'search.py');
+
+/** Default number of videos to request per hashtag. */
+const DEFAULT_COUNT = Number(process.env.TIKTOK_SEARCH_LIMIT ?? 30);
 
 /** A single normalized TikTok video metadata record. */
 export interface TikTokVideoMeta {
@@ -32,12 +42,15 @@ export interface TikTokVideoMeta {
   duration_seconds: number;
   published_at: string;
   thumbnail_url: string;
+  /** Full TikTok webpage URL (needed for downloading). */
+  url: string;
 }
 
-/** Raw yt-dlp JSON shape (only the fields we read). */
+/** Raw yt-dlp JSON shape (for getVideoMeta). */
 interface YtDlpJson {
   id?: string;
   webpage_url?: string;
+  url?: string;
   uploader?: string;
   uploader_id?: string;
   channel?: string;
@@ -79,17 +92,27 @@ function pickThumbnail(j: YtDlpJson): string {
   return j.thumbnail ?? '';
 }
 
-/** Normalize a single yt-dlp JSON record into TikTokVideoMeta. */
-function normalize(j: YtDlpJson): TikTokVideoMeta | null {
+/** Build the full TikTok webpage URL for a video. */
+function buildVideoUrl(j: YtDlpJson, handle: string): string {
+  if (j.webpage_url) return j.webpage_url;
+  const id = j.id ?? '';
+  if (id && handle) {
+    return `https://www.tiktok.com/@${handle}/video/${id}`;
+  }
+  return j.url ?? '';
+}
+
+/** Normalize a yt-dlp JSON record into TikTokVideoMeta. */
+function normalizeYtDlp(j: YtDlpJson, handle?: string): TikTokVideoMeta | null {
   const video_id = j.id ?? j.webpage_url ?? '';
   if (!video_id) return null;
 
-  // yt-dlp returns hashtags in `tags` (without leading #) for TikTok.
   const tags = Array.isArray(j.tags) ? j.tags.filter(Boolean) : [];
+  const creator = handle ?? j.uploader ?? j.channel ?? j.uploader_id ?? '';
 
   return {
     video_id,
-    creator_handle: j.uploader ?? j.channel ?? j.uploader_id ?? '',
+    creator_handle: creator,
     creator_id: j.uploader_id ?? j.channel_id ?? '',
     caption: j.title ?? j.description ?? '',
     hashtags: tags,
@@ -100,62 +123,143 @@ function normalize(j: YtDlpJson): TikTokVideoMeta | null {
     duration_seconds: j.duration ?? 0,
     published_at: parseUploadDate(j.upload_date),
     thumbnail_url: pickThumbnail(j),
+    url: buildVideoUrl(j, creator),
   };
 }
 
-/** Run yt-dlp against a TikTok URL and parse the JSON stream. */
-async function runYtDlp(url: string): Promise<TikTokVideoMeta[]> {
-  try {
-    const { stdout } = await execFileAsync('yt-dlp', [
-      '--dump-json',
-      '--flat-playlist',
-      `--playlist-end=${SEARCH_LIMIT}`,
-      '--no-warnings',
-      '--no-progress',
-      url,
-    ], {
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 5 * 60 * 1000,
-    });
-
-    const out: TikTokVideoMeta[] = [];
-    for (const line of stdout.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const parsed = JSON.parse(trimmed) as YtDlpJson;
-        const meta = normalize(parsed);
-        if (meta) out.push(meta);
-      } catch {
-        // Skip malformed lines (yt-dlp sometimes interleaves log output).
+/** Parse a stdout stream of newline-delimited JSON into TikTokVideoMeta[]. */
+function parseJsonStream(stdout: string): TikTokVideoMeta[] {
+  const out: TikTokVideoMeta[] = [];
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<TikTokVideoMeta>;
+      if (parsed.video_id) {
+        out.push({
+          video_id: parsed.video_id,
+          creator_handle: parsed.creator_handle ?? '',
+          creator_id: parsed.creator_id ?? '',
+          caption: parsed.caption ?? '',
+          hashtags: parsed.hashtags ?? [],
+          view_count: parsed.view_count ?? 0,
+          like_count: parsed.like_count ?? 0,
+          share_count: parsed.share_count ?? 0,
+          comment_count: parsed.comment_count ?? 0,
+          duration_seconds: parsed.duration_seconds ?? 0,
+          published_at: parsed.published_at || new Date().toISOString(),
+          thumbnail_url: parsed.thumbnail_url ?? '',
+          url: parsed.url ?? '',
+        });
       }
+    } catch {
+      // Skip malformed lines.
     }
-    return out;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[tiktok-client] yt-dlp failed for ${url}: ${msg}`);
-    return [];
   }
+  return out;
 }
 
 export class TikTokClient {
-  /** Search TikTok by hashtag (without the leading #). */
+  /**
+   * Search TikTok by hashtag using the Python TikTokApi CLI.
+   * Returns full metadata including view/like/comment/share counts.
+   *
+   * Requires: pip install TikTokApi playwright && python -m playwright install chromium
+   */
   async searchByHashtag(hashtag: string): Promise<TikTokVideoMeta[]> {
     const clean = hashtag.replace(/^#/, '').trim();
     if (!clean) return [];
-    const url = `https://www.tiktok.com/tag/${encodeURIComponent(clean)}`;
-    console.log(`[tiktok-client] searching hashtag #${clean} -> ${url}`);
-    return runYtDlp(url);
+    console.log(`[tiktok-client] searching hashtag #${clean} (count=${DEFAULT_COUNT})`);
+
+    try {
+      const { stdout } = await execFileAsync('python3', [
+        SEARCH_SCRIPT,
+        '--hashtag', clean,
+        '--count', String(DEFAULT_COUNT),
+      ], {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5 * 60 * 1000,
+      });
+      return parseJsonStream(stdout);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[tiktok-client] search.py failed for #${clean}: ${msg}`);
+      return [];
+    }
   }
 
-  /** Search TikTok by free-text keyword. */
-  async searchByKeyword(keyword: string): Promise<TikTokVideoMeta[]> {
-    const clean = keyword.trim();
+  /**
+   * Enrich a single video with full metadata (upload date) via yt-dlp.
+   * The TikTokApi search doesn't reliably return upload dates, so we use
+   * yt-dlp --skip-download to fill in the gap.
+   */
+  async getVideoMeta(videoUrl: string): Promise<TikTokVideoMeta | null> {
+    console.log(`[tiktok-client] fetching metadata: ${videoUrl}`);
+
+    try {
+      const { stdout } = await execFileAsync('yt-dlp', [
+        '--dump-json',
+        '--skip-download',
+        '--no-warnings',
+        '--no-progress',
+        videoUrl,
+      ], {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 60 * 1000,
+      });
+
+      const lines = stdout.split('\n').filter((l) => l.trim());
+      if (lines.length === 0) return null;
+      const parsed = JSON.parse(lines[0]) as YtDlpJson;
+      return normalizeYtDlp(parsed);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[tiktok-client] yt-dlp failed for ${videoUrl}: ${msg}`);
+      return null;
+    }
+  }
+
+  /**
+   * List a creator's recent videos via yt-dlp flat-playlist.
+   * Useful as a supplementary discovery method alongside hashtag search.
+   */
+  async listCreatorVideos(handle: string): Promise<TikTokVideoMeta[]> {
+    const clean = handle.replace(/^@/, '').trim();
     if (!clean) return [];
-    // yt-dlp supports TikTok search via the q= query parameter.
-    const url = `https://www.tiktok.com/search?q=${encodeURIComponent(clean)}`;
-    console.log(`[tiktok-client] searching keyword "${clean}" -> ${url}`);
-    return runYtDlp(url);
+    const url = `https://www.tiktok.com/@${encodeURIComponent(clean)}`;
+    console.log(`[tiktok-client] listing videos for @${clean}`);
+
+    try {
+      const { stdout } = await execFileAsync('yt-dlp', [
+        '--flat-playlist',
+        '--dump-json',
+        `--playlist-end=${DEFAULT_COUNT}`,
+        '--no-warnings',
+        '--no-progress',
+        url,
+      ], {
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 3 * 60 * 1000,
+      });
+
+      const out: TikTokVideoMeta[] = [];
+      for (const line of stdout.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as YtDlpJson;
+          const meta = normalizeYtDlp(parsed, clean);
+          if (meta) out.push(meta);
+        } catch {
+          // Skip malformed lines.
+        }
+      }
+      return out;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[tiktok-client] yt-dlp failed for @${clean}: ${msg}`);
+      return [];
+    }
   }
 }
 

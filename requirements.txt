@@ -1,0 +1,6 @@
+# Python dependencies for Nyxtok TikTok discovery.
+# Install with: pip install -r requirements.txt
+# Then: python -m playwright install chromium
+
+TikTokApi>=7.0.0
+playwright>=1.40.0
