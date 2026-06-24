@@ -1,0 +1,9 @@
+So GPT-5 is reportedly going to be released by the end of this year. According to
+multiple sources at OpenAI the new model will have significantly improved
+reasoning capabilities compared to GPT-4. The model is said to use a new
+training approach called process reward models which verifies each reasoning
+step rather than only the final answer. Benchmarks on the MATH dataset show a
+fifteen percent improvement over previous models. The context window may be
+expanded to two million tokens which would be a fourfold increase. Sam Altman
+confirmed in a recent interview that the company is investing over ten billion
+dollars in compute infrastructure for this release.

@@ -1,0 +1,90 @@
+# Nyxtok — local development stack.
+# Issue #20: docker-compose for running postgres + api + discovery + web locally.
+#
+# Usage:
+#   cp .env.example .env   # then edit values
+#   docker compose up --build
+#
+# The api and discovery services share a ./data volume mounted at /data so
+# downloaded media and the vault persist across restarts.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nyxtok
+      POSTGRES_PASSWORD: nyxtok
+      POSTGRES_DB: nyxtok
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Apply the schema on first boot.
+      - ./packages/shared/src/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nyxtok -d nyxtok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      DATABASE_URL: postgresql://nyxtok:nyxtok@postgres:5432/nyxtok
+      VAULT_PATH: /data/vault
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      VALIDATION_ENABLED: ${VALIDATION_ENABLED:-true}
+      VALIDATION_MODEL: ${VALIDATION_MODEL:-llama-3.3-70b}
+      WHISPER_SERVICE: ${WHISPER_SERVICE:-groq}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  discovery:
+    build:
+      context: .
+      dockerfile: packages/discovery/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://nyxtok:nyxtok@postgres:5432/nyxtok
+      VAULT_PATH: /data/vault
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      TIKTOK_MCP_URL: ${TIKTOK_MCP_URL:-}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      DISCOVERY_CRON: ${DISCOVERY_CRON:-0 */6 * * *}
+      DISCOVERY_RUN_NOW: "0"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+      NYXTOK_API_URL: http://api:3000
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

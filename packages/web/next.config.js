@@ -4,6 +4,9 @@ const API_TARGET =
 
 const nextConfig = {
   reactStrictMode: true,
+  // Emit a self-contained server bundle (.next/standalone) so the production
+  // image only needs node + the standalone output (Issue #20).
+  output: 'standalone',
   // Proxy /api/* requests to the backend Fastify server so the browser can use
   // same-origin relative URLs (and Bearer tokens are attached by api.ts).
   async rewrites() {
