@@ -9,7 +9,11 @@
  */
 
 import type { TranscriptResult, ValidationReport, Video } from '@nyxtok/shared';
-import { getVideo, updateVideoStatus } from '@nyxtok/shared';
+import {
+  failOrphanedInProgressJobs,
+  getVideo,
+  updateVideoStatus,
+} from '@nyxtok/shared';
 import { transcribe } from './transcribe';
 import { extractClaims } from './extract-claims';
 import { researchClaims } from './research-claim';
@@ -204,6 +208,30 @@ function startScheduler(): void {
     console.error(`[orchestrator] scheduler crashed: ${msg}`);
     schedulerStarted = false;
   });
+}
+
+/**
+ * Reconcile orphaned jobs left `in_progress` by a previous process.
+ *
+ * The queue lives in memory, so a restart while a pipeline was running strands
+ * the DB row at `in_progress` with no worker to finish it — the UI then spins
+ * "Transcribing…" / "Validating…" forever. Run this once at startup, before any
+ * new job can be enqueued: nothing is processing, so every `in_progress` row is
+ * orphaned and is marked `failed`.
+ */
+export async function recoverOrphanedJobs(): Promise<void> {
+  try {
+    const recovered = await failOrphanedInProgressJobs();
+    if (recovered.length > 0) {
+      console.warn(
+        `[orchestrator] recovered ${recovered.length} orphaned in_progress job(s) ` +
+          `left by a previous run: ${recovered.join(', ')}`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[orchestrator] failed to recover orphaned jobs: ${msg}`);
+  }
 }
 
 /**

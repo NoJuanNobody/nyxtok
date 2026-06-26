@@ -7,6 +7,8 @@ export {
   searchVideos,
   updateVideoStatus,
   getVideo,
+  failOrphanedInProgressJobs,
+  deleteExpiredVideos,
 } from './db/queries';
 
 // All shared domain types (Video, status unions, API envelopes, etc.)

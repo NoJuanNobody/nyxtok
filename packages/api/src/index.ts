@@ -3,9 +3,19 @@
  * Issue #4: starts the Fastify server on PORT env var (default 3000).
  */
 import { buildServer } from './server';
+import { recoverOrphanedJobs } from './pipeline/orchestrator';
+import { startRetentionSweeper } from './retention';
 
 async function start(): Promise<void> {
   const app = await buildServer();
+
+  // Reconcile any pipeline jobs orphaned by a previous restart/crash, so stale
+  // "Transcribing…" / "Validating…" pills resolve instead of spinning forever.
+  await recoverOrphanedJobs();
+
+  // Purge unengaged videos older than the retention window (default 48h), then
+  // keep sweeping hourly. Liked/bookmarked/saved videos are kept indefinitely.
+  startRetentionSweeper();
 
   const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   const host = process.env.HOST ?? '0.0.0.0';

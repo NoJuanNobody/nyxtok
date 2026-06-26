@@ -283,6 +283,72 @@ export async function updateVideoStatus(
 }
 
 // ---------------------------------------------------------------------------
+// failOrphanedInProgressJobs
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconcile orphaned pipeline jobs left in an `in_progress` state.
+ *
+ * The orchestrator's queue is in-memory, so a server restart (or crash) while
+ * a pipeline was running leaves rows stuck at `transcript_status` /
+ * `validation_status = 'in_progress'` with no worker to advance them. The UI
+ * then shows a "Transcribing…" / "Validating…" pill forever.
+ *
+ * Called once at startup — when nothing is processing — so any `in_progress`
+ * row is definitively orphaned and safe to mark `failed`. Returns the affected
+ * video_ids for logging.
+ */
+export async function failOrphanedInProgressJobs(): Promise<string[]> {
+  const rows = await db<Array<{ video_id: string }>>`
+    UPDATE videos
+    SET
+      transcript_status = CASE
+        WHEN transcript_status = 'in_progress' THEN 'failed'
+        ELSE transcript_status END,
+      transcript_error = CASE
+        WHEN transcript_status = 'in_progress'
+          THEN 'Pipeline interrupted (server restarted before completion)'
+        ELSE transcript_error END,
+      validation_status = CASE
+        WHEN validation_status = 'in_progress' THEN 'failed'
+        ELSE validation_status END,
+      updated_at = now()
+    WHERE transcript_status = 'in_progress' OR validation_status = 'in_progress'
+    RETURNING video_id
+  `;
+  return rows.map((r) => r.video_id);
+}
+
+// ---------------------------------------------------------------------------
+// deleteExpiredVideos
+// ---------------------------------------------------------------------------
+
+/**
+ * Purge videos that have aged out of the retention window without engagement.
+ *
+ * Discovered videos are only kept for `retentionHours` (default 48) unless the
+ * user has shown engagement — a like, bookmark, or watch-later save — in which
+ * case the row is retained indefinitely. Everything else (untouched or merely
+ * dismissed) is deleted once it is older than the window.
+ *
+ * Returns the deleted video_ids so callers can clean up on-disk artifacts
+ * (downloaded mp4s, vault notes).
+ */
+export async function deleteExpiredVideos(
+  retentionHours = 48,
+): Promise<string[]> {
+  const rows = await db<Array<{ video_id: string }>>`
+    DELETE FROM videos
+    WHERE discovered_at < now() - make_interval(hours => ${retentionHours})
+      AND is_liked = false
+      AND is_bookmarked = false
+      AND watch_later = false
+    RETURNING video_id
+  `;
+  return rows.map((r) => r.video_id);
+}
+
+// ---------------------------------------------------------------------------
 // getVideo
 // ---------------------------------------------------------------------------
 

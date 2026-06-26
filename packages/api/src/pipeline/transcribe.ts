@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import type { TranscriptResult, Video } from '@nyxtok/shared';
 import { updateVideoStatus } from '@nyxtok/shared';
 import { groqTranscribe } from './groq-client';
+import { ensureLocalVideo, tiktokPageUrl } from '../routes/stream-resolver';
 
 const execFileAsync = promisify(execFile);
 
@@ -77,6 +78,12 @@ async function extractAudio(
  * (2 min, 5 min). Throws on exhausted retries or non-retryable errors.
  */
 async function transcribeWithGroq(audioPath: string): Promise<string> {
+  // Skip Groq entirely if no valid API key — avoids 2+7 min of backoff retries.
+  const key = process.env.GROQ_API_KEY;
+  if (!key || key.length < 10) {
+    throw new Error('GROQ_API_KEY is not set or too short — skipping Groq');
+  }
+
   let lastErr: unknown;
   for (let attempt = 0; attempt <= GROQ_BACKOFF_MS.length; attempt++) {
     try {
@@ -105,6 +112,12 @@ async function transcribeWithGroq(audioPath: string): Promise<string> {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[transcribe] Groq attempt ${attempt + 1} failed: ${msg}`);
+      // Don't retry on auth errors — the key is invalid, retrying won't help.
+      if (msg.includes('401') || msg.includes('Invalid API Key') || msg.includes('invalid_api_key')) {
+        throw lastErr instanceof Error
+          ? lastErr
+          : new Error('Groq API key is invalid — not retrying');
+      }
       if (attempt < GROQ_BACKOFF_MS.length) {
         const backoff = GROQ_BACKOFF_MS[attempt];
         console.log(`[transcribe] backing off ${backoff / 1000}s before retry`);
@@ -115,6 +128,55 @@ async function transcribeWithGroq(audioPath: string): Promise<string> {
   throw lastErr instanceof Error
     ? lastErr
     : new Error('Groq transcription failed after retries');
+}
+
+/** Default whisper.cpp model path (can be overridden by WHISPER_MODEL_PATH env). */
+const WHISPER_CPP_MODEL =
+  process.env.WHISPER_MODEL_PATH ??
+  '/usr/local/Cellar/whisper-cpp/1.8.6/share/whisper-cpp/for-tests-ggml-tiny.bin';
+
+/** Path to the whisper-cli binary. */
+const WHISPER_CPP_BIN =
+  process.env.WHISPER_CPP_BIN ?? '/usr/local/Cellar/whisper-cpp/1.8.6/bin/whisper-cli';
+
+/**
+ * Transcribe audio locally using whisper.cpp.
+ *
+ * Falls back to this when Groq is unavailable and TikTok captions don't exist.
+ * Uses the model at WHISPER_CPP_MODEL (default: tiny test model; set
+ * WHISPER_MODEL_PATH to use a better model like ggml-base.en.bin).
+ */
+async function transcribeWithWhisperCpp(audioPath: string): Promise<string | null> {
+  try {
+    // Use the larger model if it exists at ~/dev/nyxtok/models/
+    const { stat } = await import('node:fs/promises');
+    const betterModel = '/Users/alejandrolondono/dev/nyxtok/models/ggml-base.en.bin';
+    let modelPath = WHISPER_CPP_MODEL;
+    try {
+      await stat(betterModel);
+      modelPath = betterModel;
+    } catch {
+      // Fall back to default tiny model
+    }
+
+    const { stdout } = await execFileAsync(
+      WHISPER_CPP_BIN,
+      ['-m', modelPath, '-f', audioPath, '--no-timestamps', '-l', 'auto'],
+      { timeout: 5 * 60 * 1000, maxBuffer: 64 * 1024 * 1024 },
+    );
+    // whisper-cli outputs lines like "[00:00:00.000 --> 00:00:03.000]  text"
+    // Strip timestamps and join
+    const lines = stdout.split(/\r?\n/);
+    const text = lines
+      .map((l) => l.replace(/^\[[\d:.]+\s*-->\s*[\d:.]+\]\s*/, '').trim())
+      .filter(Boolean)
+      .join(' ');
+    return text || null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[transcribe] whisper.cpp failed: ${msg}`);
+    return null;
+  }
 }
 
 /**
@@ -234,33 +296,28 @@ function cleanTranscript(raw: string): string {
 export async function transcribe(video: Video): Promise<TranscriptResult> {
   await updateVideoStatus(video.video_id, { transcript_status: 'in_progress' });
 
-  // Resolve the local video file path.
-  const videoPath = video.download_url ?? '';
-  if (!videoPath) {
-    await updateVideoStatus(video.video_id, {
-      transcript_status: 'failed',
-      transcript_error: 'No download_url available for audio extraction.',
-    });
-    throw new Error(`[transcribe] ${video.video_id}: no download_url`);
-  }
-
   const workDir = await mkdtemp(join(tmpdir(), 'nyxtok-tx-'));
   const wavPath = join(workDir, 'audio.wav');
 
   try {
-    // Step 1: extract audio.
-    await extractAudio(videoPath, wavPath);
-
     let rawText: string | null = null;
     let source: TranscriptResult['source'] = 'whisper';
 
-    // Step 2: Groq Whisper.
+    // Step 1+2: resolve a local copy, extract audio, transcribe via Groq.
+    // `download_url` is a signed, session-bound TikTok CDN link that ffmpeg
+    // can't read directly, so we resolve a real local file the same way the
+    // stream endpoint does (yt-dlp, cached on disk and shared with playback).
+    // Audio extraction + Groq live in one try so any failure here still falls
+    // through to the TikTok auto-captions path below.
     try {
+      const pageUrl = tiktokPageUrl(video.creator_handle, video.video_id);
+      const localPath = await ensureLocalVideo(video.video_id, pageUrl);
+      await extractAudio(localPath, wavPath);
       rawText = await transcribeWithGroq(wavPath);
       console.log(`[transcribe] ${video.video_id}: Groq Whisper succeeded`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[transcribe] ${video.video_id}: Groq failed: ${msg}`);
+      console.warn(`[transcribe] ${video.video_id}: Groq path failed: ${msg}`);
 
       // Step 3: TikTok auto-captions fallback.
       console.log(`[transcribe] ${video.video_id}: trying TikTok captions`);
@@ -272,10 +329,21 @@ export async function transcribe(video: Video): Promise<TranscriptResult> {
           `[transcribe] ${video.video_id}: using TikTok auto-captions`,
         );
       } else {
-        // Step 4: whisper.cpp fallback (MVP: skip if not installed).
-        console.warn(
-          `[transcribe] ${video.video_id}: no captions; whisper.cpp fallback not installed for MVP`,
+        // Step 4: whisper.cpp local fallback.
+        console.log(
+          `[transcribe] ${video.video_id}: trying whisper.cpp local`,
         );
+        const whisperText = await transcribeWithWhisperCpp(wavPath);
+        if (whisperText && whisperText.trim().length > 0) {
+          rawText = whisperText;
+          console.log(
+            `[transcribe] ${video.video_id}: whisper.cpp succeeded`,
+          );
+        } else {
+          console.warn(
+            `[transcribe] ${video.video_id}: whisper.cpp returned empty`,
+          );
+        }
       }
     }
 

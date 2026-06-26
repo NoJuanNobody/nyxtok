@@ -14,6 +14,7 @@ import {
   likeVideo,
   streamUrl,
 } from '@/lib/api';
+import { useMutePreference } from '@/lib/useMutePreference';
 import { useToast } from './Toast';
 
 interface VideoCardProps {
@@ -36,8 +37,14 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
   const [inView, setInView] = useState(false);
+  // Mirror of `inView` readable synchronously inside event handlers (e.g. the
+  // video's `canplay`), without waiting for a re-render.
+  const inViewRef = useRef(false);
+  // Bounded retry counter for transient stream failures (see handleVideoError).
+  const retryRef = useRef(0);
   const [srcLoaded, setSrcLoaded] = useState(false);
-  const [muted, setMuted] = useState(true);
+  // Mute is an app-wide preference shared across every card (persisted).
+  const [muted, setMuted] = useMutePreference();
 
   // Local optimistic state mirrors of server-tracked flags.
   const [isLiked, setIsLiked] = useState(video.is_liked);
@@ -65,32 +72,80 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
       (entries) => {
         const entry = entries[0];
         if (!entry) return;
-        setInView(entry.intersectionRatio >= 0.6);
+        // Hysteresis: become active at >=0.6, stay active until <0.25. This
+        // prevents a brief intersection "settle dip" (during the feed mounting
+        // or scroll-snap aligning) from latching the active card to paused —
+        // the card then rests at ratio ~1 with no further threshold crossing,
+        // so it would otherwise never recover until the user scrolls.
+        const r = entry.intersectionRatio;
+        const prev = inViewRef.current;
+        const next = prev ? r >= 0.25 : r >= 0.6;
+        if (next !== prev) {
+          inViewRef.current = next;
+          setInView(next);
+        }
       },
-      { threshold: [0, 0.6, 1] },
+      { threshold: [0, 0.25, 0.6, 1] },
     );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
   // --- Play / pause based on visibility -------------------------------------
+  // Depends on srcLoaded too: the <video> element is gated behind `srcLoaded`,
+  // so it isn't mounted yet on the render where `inView` first flips true. We
+  // must re-run once the element actually mounts (srcLoaded -> true) or the
+  // initially-visible card never autoplays until a scroll re-triggers the
+  // observer.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (inView) {
-      void v.play().catch(() => {
-        /* autoplay can be blocked; user can tap to play */
-      });
-    } else {
-      v.pause();
+    if (inView && srcLoaded) {
+      const tryPlay = () => {
+        // The element produced data, so any earlier failure has cleared.
+        retryRef.current = 0;
+        // Guard with the ref so a `canplay` that fires after the user already
+        // scrolled away doesn't resume a now-inactive card.
+        if (!inViewRef.current) return;
+        void v.play().catch(() => {
+          /* autoplay can be blocked; user can tap to play */
+        });
+      };
+      // Attempt immediately, but also when the element first has enough data —
+      // on a cold load the src may still be downloading when this runs, so the
+      // initial play() can resolve without ever starting playback.
+      tryPlay();
+      v.addEventListener('canplay', tryPlay);
+      return () => v.removeEventListener('canplay', tryPlay);
     }
-  }, [inView]);
+    v.pause();
+  }, [inView, srcLoaded]);
 
   // --- Lazy-load the video src when near the viewport -----------------------
   useEffect(() => {
     if (srcLoaded) return;
     if (inView) setSrcLoaded(true);
   }, [inView, srcLoaded]);
+
+  // --- Self-heal transient stream failures ----------------------------------
+  // On a cold first view the stream endpoint downloads the file on demand, so
+  // the very first request can stall and the <video> latches a load error
+  // (and won't retry on its own). Reload the element a few times with backoff;
+  // by the retry the file is usually cached server-side and plays.
+  const handleVideoError = useCallback(() => {
+    const v = videoRef.current;
+    if (!v || retryRef.current >= 3) return;
+    retryRef.current += 1;
+    const attempt = retryRef.current;
+    window.setTimeout(() => {
+      const el = videoRef.current;
+      if (!el) return;
+      el.load();
+      if (inViewRef.current) {
+        void el.play().catch(() => {});
+      }
+    }, 700 * attempt);
+  }, []);
 
   // --- Transcript polling (#14) ---------------------------------------------
   // Only poll for videos the user has liked or bookmarked — that's when the
@@ -291,7 +346,8 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
           playsInline
           preload="auto"
           className="absolute inset-0 h-full w-full object-cover"
-          onClick={() => setMuted((m) => !m)}
+          onClick={() => setMuted(!muted)}
+          onError={handleVideoError}
         />
       )}
 
@@ -369,7 +425,7 @@ export default function VideoCard({ video, onDismiss }: VideoCardProps) {
       {inView && (
         <button
           type="button"
-          onClick={() => setMuted((m) => !m)}
+          onClick={() => setMuted(!muted)}
           className="absolute right-3 top-3 z-20 rounded-full bg-black/50 px-2.5 py-1 text-xs"
           aria-label={muted ? 'Unmute' : 'Mute'}
         >

@@ -12,8 +12,16 @@
 import { upsertVideo } from '@nyxtok/shared';
 import type { Video } from '@nyxtok/shared';
 import { TikTokClient, type TikTokVideoMeta } from './tiktok-client';
-import { applyViralFilter } from './viral-filter';
+import { applyViralFilter, DEFAULT_VIRAL_CONFIG } from './viral-filter';
 import { applyAiFilter } from './ai-filter';
+import {
+  computeEngagementProfile,
+  getAdjustedHashtags,
+  getAdjustedCreators,
+  getAdjustedViralConfig,
+  getExtraAiKeywords,
+  type EngagementProfile,
+} from './engagement';
 
 /**
  * Hashtags searched (without leading #). Override via TIKTOK_HASHTAGS env var
@@ -98,6 +106,7 @@ function toVideoRow(
 /** Process a single hashtag: search, filter, enrich, store. */
 async function processHashtag(
   hashtag: string,
+  viralConfig?: { min_views: number; min_likes: number; min_engagement_rate: number },
 ): Promise<{ found: number; viral: number; stored: number }> {
   // Search via TikTokApi (playwright) — returns full engagement metrics.
   const found = await client.searchByHashtag(hashtag);
@@ -110,8 +119,18 @@ async function processHashtag(
     return true;
   });
 
-  // Viral engagement filter.
-  const viral = applyViralFilter(unique);
+  // Viral engagement filter (use adjusted config if provided).
+  const viral = viralConfig
+    ? unique.filter((v) => {
+        // Inline viral filter with custom config
+        const er = v.view_count > 0
+          ? (v.like_count + v.comment_count + v.share_count) / v.view_count
+          : 0;
+        if (v.view_count >= viralConfig.min_views) return true;
+        if (v.like_count >= viralConfig.min_likes && er >= viralConfig.min_engagement_rate) return true;
+        return false;
+      })
+    : applyViralFilter(unique);
 
   // Enrich: fill in upload dates from yt-dlp (TikTokApi doesn't return them).
   const enriched: TikTokVideoMeta[] = [];
@@ -157,6 +176,7 @@ async function processHashtag(
 /** Process a single creator (supplementary to hashtag search). */
 async function processCreator(
   handle: string,
+  viralConfig?: { min_views: number; min_likes: number; min_engagement_rate: number },
 ): Promise<{ found: number; viral: number; stored: number }> {
   const found = await client.listCreatorVideos(handle);
 
@@ -167,7 +187,16 @@ async function processCreator(
     return true;
   });
 
-  const viral = applyViralFilter(unique);
+  const viral = viralConfig
+    ? unique.filter((v) => {
+        const er = v.view_count > 0
+          ? (v.like_count + v.comment_count + v.share_count) / v.view_count
+          : 0;
+        if (v.view_count >= viralConfig.min_views) return true;
+        if (v.like_count >= viralConfig.min_likes && er >= viralConfig.min_engagement_rate) return true;
+        return false;
+      })
+    : applyViralFilter(unique);
   const scored = await applyAiFilter(viral);
 
   let stored = 0;
@@ -197,9 +226,52 @@ export async function runDiscovery(): Promise<{
   total_stored: number;
 }> {
   const startedAt = new Date().toISOString();
-  const hashtags = getHashtags();
-  const creators = getCreators();
-  console.log(`[discovery] run starting at ${startedAt} (${hashtags.length} hashtags, ${creators.length} creators)`);
+
+  // Compute engagement profile from user's likes/dismissals/bookmarks.
+  let profile: EngagementProfile | null = null;
+  try {
+    profile = await computeEngagementProfile();
+    console.log(
+      `[discovery] engagement profile: liked=${profile.likedCount} ` +
+      `bookmarked=${profile.bookmarkedCount} dismissed=${profile.dismissedCount} ` +
+      `likedHashtags=${profile.hashtagWeights.size} ` +
+      `likedCreators=${profile.likedCreators.size} ` +
+      `likedKeywords=${profile.likedKeywords.length}`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[discovery] engagement profile failed (using defaults): ${msg}`);
+  }
+
+  // Adjust hashtags and creators based on engagement.
+  const baseHashtags = getHashtags();
+  const baseCreators = getCreators();
+  const hashtags = profile
+    ? getAdjustedHashtags(baseHashtags, profile)
+    : baseHashtags;
+  const creators = profile
+    ? getAdjustedCreators(baseCreators, profile)
+    : baseCreators;
+
+  // Adjust viral filter thresholds based on engagement.
+  const viralConfig = profile
+    ? getAdjustedViralConfig(
+        { min_views: DEFAULT_VIRAL_CONFIG.min_views, min_likes: DEFAULT_VIRAL_CONFIG.min_likes, min_engagement_rate: DEFAULT_VIRAL_CONFIG.min_engagement_rate },
+        profile,
+      )
+    : { min_views: DEFAULT_VIRAL_CONFIG.min_views, min_likes: DEFAULT_VIRAL_CONFIG.min_likes, min_engagement_rate: DEFAULT_VIRAL_CONFIG.min_engagement_rate };
+
+  // Extract extra AI keywords from liked transcripts.
+  const extraKeywords = profile ? getExtraAiKeywords(profile) : [];
+  if (extraKeywords.length > 0) {
+    console.log(`[discovery] extra AI keywords from engagement: ${extraKeywords.join(', ')}`);
+  }
+
+  console.log(
+    `[discovery] run starting at ${startedAt} ` +
+    `(${hashtags.length} hashtags, ${creators.length} creators, ` +
+    `min_views=${viralConfig.min_views}, min_likes=${viralConfig.min_likes})`,
+  );
 
   let total_found = 0;
   let total_viral = 0;
@@ -208,7 +280,7 @@ export async function runDiscovery(): Promise<{
   // Phase 1: Hashtag search via TikTokApi.
   for (const tag of hashtags) {
     try {
-      const r = await processHashtag(tag);
+      const r = await processHashtag(tag, viralConfig);
       total_found += r.found;
       total_viral += r.viral;
       total_stored += r.stored;
@@ -221,7 +293,7 @@ export async function runDiscovery(): Promise<{
   // Phase 2: Creator monitoring via yt-dlp (optional, supplementary).
   for (const handle of creators) {
     try {
-      const r = await processCreator(handle);
+      const r = await processCreator(handle, viralConfig);
       total_found += r.found;
       total_viral += r.viral;
       total_stored += r.stored;

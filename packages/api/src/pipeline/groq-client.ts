@@ -31,6 +31,31 @@ function getApiKey(): string {
 }
 
 /**
+ * Resolve the chat API key and base URL.
+ *
+ * Prefers GROQ_API_KEY (Groq's own endpoint). If not set, falls back to
+ * OPENROUTER_API_KEY with the OpenRouter base URL — OpenRouter is
+ * OpenAI-compatible so the same chat completions call works.
+ */
+function getChatConfig(): { key: string; baseUrl: string; model: string } {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey) {
+    return { key: groqKey, baseUrl: GROQ_BASE, model: DEFAULT_CHAT_MODEL };
+  }
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    return {
+      key: orKey,
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: process.env.VALIDATION_MODEL || 'meta-llama/llama-3.3-70b-instruct',
+    };
+  }
+  throw new Error(
+    'No chat API key set — need GROQ_API_KEY or OPENROUTER_API_KEY.',
+  );
+}
+
+/**
  * Transcribe an audio file via Groq's Whisper endpoint.
  *
  * POSTs the file as multipart/form-data to
@@ -86,18 +111,19 @@ export async function groqTranscribe(
  */
 export async function groqChat(
   messages: ChatMessage[],
-  model: string = DEFAULT_CHAT_MODEL,
+  model?: string,
 ): Promise<string> {
-  const key = getApiKey();
+  const { key, baseUrl, model: defaultModel } = getChatConfig();
+  const useModel = model ?? defaultModel;
 
-  const res = await fetch(`${GROQ_BASE}/chat/completions`, {
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model,
+      model: useModel,
       messages,
       temperature: 0.2,
     }),
@@ -106,7 +132,7 @@ export async function groqChat(
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(
-      `Groq chat failed (${res.status}): ${body.slice(0, 500)}`,
+      `Chat API failed (${res.status}): ${body.slice(0, 500)}`,
     );
   }
 

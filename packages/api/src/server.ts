@@ -14,6 +14,7 @@ import dismissRoutes from './routes/dismiss';
 import transcriptRoutes from './routes/transcript';
 import searchRoutes from './routes/search';
 import streamRoutes from './routes/stream';
+import engagementRoutes from './routes/engagement';
 
 /**
  * Build and configure the Fastify instance.
@@ -93,6 +94,7 @@ export async function buildServer() {
   await app.register(transcriptRoutes);
   await app.register(searchRoutes);
   await app.register(streamRoutes);
+  await app.register(engagementRoutes);
 
   return app;
 }

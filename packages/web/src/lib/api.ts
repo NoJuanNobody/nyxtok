@@ -73,7 +73,12 @@ export async function apiRequest<T>(
 
   let res: Response;
   try {
-    res = await fetch(path, { ...init, headers });
+    // When accessed from a non-localhost device (e.g. phone on LAN),
+    // Next.js rewrites proxy to localhost which times out. Use absolute URL instead.
+    const apiBase = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+      ? `${window.location.protocol}//${window.location.hostname}:3000`
+      : '';
+    res = await fetch(`${apiBase}${path}`, { ...init, headers });
   } catch (err) {
     throw new ApiError(0, 'NETWORK_ERROR', (err as Error).message);
   }
@@ -170,7 +175,10 @@ export function fetchTranscript(
 
 /** Relative URL for the streaming endpoint (proxied through Next rewrites). */
 export function streamUrl(videoId: string): string {
-  return `/api/videos/${encodeURIComponent(videoId)}/stream`;
+  const apiBase = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+    ? `${window.location.protocol}//${window.location.hostname}:3000`
+    : '';
+  return `${apiBase}/api/videos/${encodeURIComponent(videoId)}/stream`;
 }
 
 export type {

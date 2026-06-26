@@ -4,6 +4,8 @@ node_modules
 dist
 .next
 data/
+models/
+*.bin
 *.log
 *.tsbuildinfo
 .env.swp

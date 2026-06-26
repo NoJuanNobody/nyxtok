@@ -35,9 +35,15 @@ RUN pnpm --filter @nyxtok/api build
 # ---------------------------------------------------------------------------
 FROM node:20-slim AS runtime
 
-# ffmpeg is required for audio extraction during transcription.
+# ffmpeg: audio extraction during transcription.
+# yt-dlp: resolve fresh TikTok CDN URLs at stream time (self-contained binary).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+        -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && apt-get purge -y curl \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
