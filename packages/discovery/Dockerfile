@@ -52,7 +52,8 @@ COPY --from=builder /app/node_modules /app/node_modules
 COPY --from=builder /app/packages/discovery/node_modules /app/packages/discovery/node_modules
 COPY --from=builder /app/packages/shared/node_modules /app/packages/shared/node_modules
 
-# Persistent storage mount for downloaded media / vault.
-VOLUME ["/data"]
+# Persistent storage for downloaded media / vault is provided at runtime by a
+# Railway Volume mounted at /data (Railway rejects the Docker VOLUME instruction
+# in favor of its managed volumes).
 
 CMD ["node", "/app/dist/main.js"]

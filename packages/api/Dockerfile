@@ -55,8 +55,9 @@ ENV NODE_ENV=production \
 # Copy the bundled server.
 COPY --from=builder /app/packages/api/dist/index.js /app/dist/index.js
 
-# Persistent storage mount for the vault (transcripts, validation notes).
-VOLUME ["/data"]
+# Persistent storage for the vault (transcripts, validation notes) is provided
+# at runtime by a Railway Volume mounted at /data (Railway rejects the Docker
+# VOLUME instruction in favor of its managed volumes).
 
 EXPOSE 3000
 
