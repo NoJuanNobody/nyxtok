@@ -1,5 +1,19 @@
 # Nyxtok
 
+**A self-hosted, TikTok-style feed of AI videos for one learner: like a video and Nyxtok transcribes it, fact-checks its claims against web sources, and saves a Markdown note with an accuracy score.**
+
+[![Nyxtok explainer video: a liked example clip scores 2 of 3 claims verified, 67%](docs/explainer/poster.png)](https://nojuannobody.github.io/nyxtok/explainer/explainer.mp4)
+
+[▶ Watch the 73-second explainer](https://nojuannobody.github.io/nyxtok/explainer/explainer.mp4) · [Read the one-page explainer](https://nojuannobody.github.io/nyxtok/explainer/)
+
+### How it works for you
+
+1. **Nyxtok finds videos.** Every 6 hours a worker searches TikTok AI hashtags and keeps only viral, AI-relevant videos.
+2. **You swipe the feed.** Paste your token, then watch one full-screen video at a time with Like, Save and Dismiss.
+3. **You tap like.** That starts the pipeline: Whisper transcript, claim extraction, web research and classification.
+4. **You get a score and a note.** The card shows a "% verified" badge, and a Markdown note (transcript, claims, sources) lands in your vault.
+5. **Your library keeps what matters.** Liked and saved videos stay; the rest are deleted after 48 hours.
+
 Nyxtok is an AI-powered TikTok learning pipeline. It discovers AI/ML TikTok
 content, downloads and transcribes the audio, extracts factual claims, runs
 deep-research fact-checking against live web sources, and persists
